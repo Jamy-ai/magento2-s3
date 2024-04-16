@@ -61,6 +61,8 @@ class S3 extends DataObject
      */
     private $objects = [];
 
+    private $storageFile;
+
     public static $scheduledForDeletion = [];
 
     /**
@@ -73,7 +75,8 @@ class S3 extends DataObject
         DataHelper $helper,
         \Magento\MediaStorage\Helper\File\Media $mediaHelper,
         \Magento\MediaStorage\Helper\File\Storage\Database $storageHelper,
-        LoggerInterface $logger
+        LoggerInterface $logger,
+        \Magento\MediaStorage\Model\File\Storage\File $storageFile
     ) {
         parent::__construct();
 
@@ -83,27 +86,16 @@ class S3 extends DataObject
         $this->logger = $logger;
         $this->serializer = $this->getSerializer();
 
-        $options = [
-            'version' => 'latest',
-            'region' => $this->helper->getRegion(),
-            'use_path_style_endpoint' => true, //Add this to helper
-            'credentials' => [
-                'key' => $this->helper->getAccessKey(),
-                'secret' => $this->helper->getSecretKey(),
-            ],
-        ];
+        $this->storageFile = $storageFile;
+        $json_key = $this->helper->getAccessKey();
+        $key_array = json_decode( $json_key,true );
+        $project = $key_array['project_id'];
 
-        if ($this->helper->getEndpointEnabled()) {
-            if ($this->helper->getEndpoint()) {
-                $options['endpoint'] = $this->helper->getEndpoint();
-            }
-
-            if ($this->helper->getEndpointRegion()) {
-                $options['region'] = $this->helper->getEndpointRegion();
-            }
-        }
-
-        $this->client = new \Aws\S3\S3Client($options);
+        $this->client = new \cAc\GcsWrapper\GoogleCloudStorage(
+            $project,
+            $json_key,
+            $this->helper->getBucket()
+        );
 
         // We will delete renamed old files at the end of request.
         register_shutdown_function([$this, 'deleteFilesScheduledForDeletion']);
@@ -146,7 +138,7 @@ class S3 extends DataObject
      */
     public function getStorageName()
     {
-        return __('Amazon S3');
+        return __('Google Cloud Storage');
     }
 
     /**
@@ -155,33 +147,30 @@ class S3 extends DataObject
      */
     public function loadByFilename($filename)
     {
+        $this->logger->info("GCSTEST loadByFilename ".$filename);
         $fail = false;
         try {
-            $object = $this->client->getObject([
-                'Bucket' => $this->getBucket(),
-                'Key' => $filename,
-            ]);
-
-            if ($object['Body']) {
-                $this->setData('id', $filename);
-                $this->setData('filename', $filename);
-                $this->setData('content', (string)$object['Body']);
-            } else {
-                $fail = true;
-            }
-        } catch (S3Exception $e) {
-            $fail = true;
-
+            $object = $this->client->bucket_object_get($filename);
+            $objectInfo = $object->info();
+            $objectAsString = $object->downloadAsString();
+            $this->setData('id', $objectInfo["id"]);
+            $this->setData('filename', $filename);
+            $this->setData('content', $objectAsString);
+        }
+        catch (\Exception $e) {
+            $this->logger->info("GCST loadByFilename exception ".$e->getMessage());
             $this->logger->error('Failed to load file from S3.', [
                 $filename,
                 $e->getMessage(),
             ]);
+            $fail = true;
         }
 
         if ($fail) {
+        
             $this->unsetData();
-        }
-
+       
+       }
         return $this;
     }
 
@@ -343,18 +332,21 @@ class S3 extends DataObject
     {
         $file = $this->mediaHelper->collectFileInfo($this->getMediaBaseDirectory(), $filename);
 
-        try{
-            $this->client->putObject($this->getAllParams([
-                'Body' => $file['content'],
-                'Bucket' => $this->getBucket(),
-                'ContentType' => \GuzzleHttp\Psr7\mimetype_from_filename($file['filename']),
-                'Key' => $filename,
-            ]));
-        } catch (S3Exception $e) {
-            $this->logger->error('Failed to save file in S3.', [
-                $filename,
-                $e->getMessage(),
-            ]);
+        try {
+            $mediaPath = $file['directory'].'/'.$file['filename'];
+            $this->client->bucket_upload_object(
+                $mediaPath,
+                $this->storageHelper->getMediaBaseDir(),
+                $file['filename'],
+                false,
+                "publicRead"
+            );
+        } 
+        catch (\Exception $e) {
+            $this->logger->info("GCS saveFile exception ".$e->getMessage());
+            $this->errors[] = $e->getMessage();
+            $this->logger->critical($e);
+        
         }
 
         return $this;
@@ -408,7 +400,7 @@ class S3 extends DataObject
      */
     public function fileExists($filename)
     {
-        return $this->client->doesObjectExist($this->getBucket(), $filename);
+        return $this->client->object_exists($filename);
     }
 
     /**
@@ -419,13 +411,9 @@ class S3 extends DataObject
     public function copyFile($oldFilePath, $newFilePath)
     {
         try{
-            $this->client->copyObject($this->getAllParams([
-                'Bucket' => $this->getBucket(),
-                'Key' => $newFilePath,
-                'CopySource' => $this->getBucket() . '/' . $oldFilePath,
-            ]));
-        } catch (S3Exception $e) {
-            $this->logger->error('Failed to copy file in S3.', [
+            $object = $this->client->bucket_copy_object($oldFilePath, $newFilePath);
+        } catch (\Exception $e) {
+            $this->logger->error('Failed to copy file in GCS.', [
                 $oldFilePath,
                 $newFilePath,
                 $e->getMessage(),
@@ -443,17 +431,13 @@ class S3 extends DataObject
     public function renameFile($oldFilePath, $newFilePath)
     {
         try{
-            $this->client->copyObject($this->getAllParams([
-                'Bucket' => $this->getBucket(),
-                'Key' => $newFilePath,
-                'CopySource' => $this->getBucket() . '/' . $oldFilePath,
-            ]));
-
+            $object = $this->client->bucket_copy_object($oldFilePath, $newFilePath);
             // This file can be used for other configurable product as well.
             // We will delete it at the end of request.
             self::$scheduledForDeletion[$oldFilePath] = $oldFilePath;
-        } catch (S3Exception $e) {
-            $this->logger->error('Failed to rename file in S3.', [
+        } catch (\Exception $e) {
+            $this->logger->info("GCSTEST renameFile exception ".$e->getMessage());
+            $this->logger->error('Failed to rename file in GCS.', [
                 $oldFilePath,
                 $newFilePath,
                 $e->getMessage(),
@@ -471,10 +455,8 @@ class S3 extends DataObject
      */
     public function deleteFile($path)
     {
-        $this->client->deleteObject([
-            'Bucket' => $this->getBucket(),
-            'Key' => $path,
-        ]);
+        $object = $this->client->bucket_object_get($path);
+        $object->delete();
 
         return $this;
     }

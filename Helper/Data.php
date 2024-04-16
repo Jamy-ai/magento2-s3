@@ -45,8 +45,7 @@ class Data extends AbstractHelper
      */
     public function getAccessKey()
     {
-        $accessKey =  $this->scopeConfig->getValue('thai_s3/general/access_key');
-        return $this->encryptor->decrypt($accessKey);
+        return $this->scopeConfig->getValue('google_cloud/general/access_key');
     }
 
     /**
@@ -63,7 +62,7 @@ class Data extends AbstractHelper
      */
     public function getRegion()
     {
-        return $this->scopeConfig->getValue('thai_s3/general/region');
+        return $this->scopeConfig->getValue('google_cloud/general/region');
     }
 
     /**
@@ -95,7 +94,7 @@ class Data extends AbstractHelper
      */
     public function getBucket()
     {
-        return $this->scopeConfig->getValue('thai_s3/general/bucket');
+        return $this->scopeConfig->getValue('google_cloud/general/bucket');
     }
 
     public function getExpires()
@@ -117,5 +116,10 @@ class Data extends AbstractHelper
     public function getCustomHeaders()
     {
         return $this->scopeConfig->getValue('thai_s3/headers/custom_headers');
+    }
+
+    public function getProject()
+    {
+        return $this->scopeConfig->getValue('google_cloud/general/project');
     }
 }
